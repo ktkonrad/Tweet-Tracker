@@ -7,6 +7,10 @@ import MySQLdb
 import logging
 import datetime
 import atexit
+import signal
+import optparse
+import sys
+import pickle
 
 ## helpers - move these out at some point
 utc_open_time = datetime.time(14,30,0) # 9:30am EST = 2:30pm UTC # TODO: daylight savings time
@@ -17,7 +21,7 @@ def round_to_next_open(dt):
 
 
 class Tracker:
-    def __init__(self, config_file):
+    def __init__(self, config_file, dump_file=None):
 
         # get config stuff
         config = ConfigParser.ConfigParser()
@@ -48,7 +52,11 @@ class Tracker:
         # initialize other stuff
         self.last_date = None
         self.tweet_count = 0
-        self.frequencies = dict()
+        if dump_file:
+            with open(dump_file, 'r') as dumpfile:
+                self.frequencies = pickle.load(dumpfile)
+        else:
+            self.frequencies = dict()
 
     def is_negative(self, word):
         """return whether a word is negative
@@ -123,7 +131,7 @@ class Tracker:
             self.log('No text', tweet)
         else:
             self.tweet_count += 1
-            now_date = self.round_to_next_open(datetime.datetime.utcnow())
+            now_date = round_to_next_open(datetime.datetime.utcnow())
             if now_date != self.last_date:
                 if self.last_date:
                     self.end_day(self.last_date)
@@ -178,21 +186,32 @@ class Tracker:
 
     def dump(self):
         """dump the frequencies to a file"""
-        import pickle
-        with open('freq_dump.pckl') as pickle_file:
+        with open('freq_dump.pckl', 'w') as pickle_file:
             pickle.dump(self.frequencies, pickle_file)
+tracker = None
 
 def main():
+    global tracker
+    usage = 'usage: %prog -d dumpfile'
+    parser = optparse.OptionParser(usage=usage)
+    parser.add_option('-d', '--dumpfile', action='store', type='string', dest='dump_file', default=None, help='read dumped frequencies from file')
+    (options, args) = parser.parse_args()
+
     atexit.register(email_alert)
     CONFIG_FILE = 'tweet_tracker.cfg'
-    tracker = Tracker(CONFIG_FILE)
+    tracker = Tracker(CONFIG_FILE, options.dump_file)
+    signal.signal(signal.SIGINT, sigint_handler) # respond to SIGINT by dumping
     try:
         tracker.crawl()
     except Exception as e: # unhandled exception falls through to here
-        log(e)
+        print e
         tracker.dump()
 
-
+def sigint_handler(signum, frame):
+    global tracker
+    print 'handling sigint'
+    tracker.dump()
+    sys.exit(0)
 
 def email_alert():
     import smtplib
