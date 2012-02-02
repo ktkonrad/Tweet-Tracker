@@ -11,6 +11,7 @@ import signal
 import optparse
 import sys
 import pickle
+import re
 
 ## helpers - move these out at some point
 utc_open_time = datetime.time(14,30,0) # 9:30am EST = 2:30pm UTC # TODO: daylight savings time
@@ -83,6 +84,11 @@ class Tracker:
         except KeyError:
             return None, None
 
+    def strip_punctuation(self, word):
+        """string trailing punctuation from a word"""
+        m = re.match("([a-zA-Z\-']+)[\.,!\?;:]", word)
+        return m.groups()[0] if m else word
+
     def increment_frequencies(self, text):
         """increment frequencies for all words in text"""
         
@@ -91,7 +97,7 @@ class Tracker:
 
         last_negative = NEGATIVE_SCOPE + 1
         # TODO: trie matching
-        for word in unicode(text).translate(dict([[ord(c),u''] for c in unicode(string.punctuation)])).lower().split(): # strip punctuation, lowercase, and split on whitespace
+        for word in map(self.strip_punctuation, text.split()):
             if self.is_negative(word):
                 last_negative = 0
             else:
