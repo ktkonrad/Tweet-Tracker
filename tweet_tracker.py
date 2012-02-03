@@ -21,7 +21,7 @@ def round_to_next_open(dt):
 ## end helpers
 
 
-class Tracker:
+class tracker:
     def __init__(self, config_file, dump_file=None):
 
         # get config stuff
@@ -33,6 +33,7 @@ class Tracker:
             with open(config.get('files', 'negatives')) as negatives_file:
                 self.negatives = negatives_file.read().split()
             logging.basicConfig(filename=config.get('log', 'logfile'), level=logging.DEBUG, format='%(asctime)s %(levelname)s %(message)s') # initialize logging
+            self.dump_file = config.get('files', 'dump')
                 
         # connect to mongo
         mongo_connection = pymongo.Connection('localhost', 27017)
@@ -43,21 +44,17 @@ class Tracker:
         self.mysql_cursor = self.mysql.cursor()
 
         # get terms from mysql
-        self.mysql_cursor.execute("SELECT term FROM terms")
+        self.mysql_cursor.execute("SELECT `term` FROM `terms`")
         self.terms = [row[0] for row in self.mysql_cursor.fetchall()]
 
-        # don't access directly. use get_term_id_and_is_negative
+        # don't access directly. use get_term
         # term : (parent_or_self_id, is_negative)
-        self._term_ids = dict([(term, (None, None)) for term in self.terms])
+        self._term_info = dict([(term, (None, None, None)) for term in self.terms])
 
         # initialize other stuff
         self.last_date = None
         self.tweet_count = 0
-        if dump_file:
-            with open(dump_file, 'r') as dumpfile:
-                self.frequencies = pickle.load(dumpfile)
-        else:
-            self.frequencies = dict()
+        self.frequencies = dict()
 
     def is_negative(self, word):
         """return whether a word is negative
@@ -65,24 +62,25 @@ class Tracker:
         """
         return word in self.negatives
 
-    def get_term_id_and_is_negative(self, term):
+    def get_term(self, term):
         """if term has a parent
-             return parent_id, term.is_negative
+             return parent_id, term.is_negative, term.is_word
            else
-              return id (or None if term is not a term), term.is_negative
-           does a mysql query and memoizes in self._term_ids
+              return id (or None if term is not a term), term.is_negative, term.is_word
+           does a mysql query and memoizes in self._term_info
         """
         try:
-            term_id, is_negative = self._term_ids[term]
+            (term_id, is_negative, is_word) = self._term_info[term]
             if not term_id:
-                self.mysql_cursor.execute("""SELECT `id`, `parent_id`, `is_negative` FROM `terms` where `term` = %s""", (term,))
+                self.mysql_cursor.execute("""SELECT `id`, `parent_id`, `is_negative`, `type` FROM `terms` where `term` = %s""", (term,))
                 row = self.mysql_cursor.fetchone()
                 term_id = row[1] or row[0]
-                is_negative = row[2] # TODO: is this an int or bool?
-                self._term_ids[term] = (term_id, is_negative)
-            return term_id, is_negative
+                is_negative = bool(row[2])
+                is_word = row[3] == 'word'
+                self._term_info[term] = (term_id, is_negative, is_word)
+            return (term_id, is_negative, is_word)
         except KeyError:
-            return None, None
+            return (None, None, None)
 
     def strip_punctuation(self, word):
         """string trailing punctuation from a word"""
@@ -102,9 +100,9 @@ class Tracker:
                 last_negative = 0
             else:
                 last_negative += 1
-            term_id, is_negative = self.get_term_id_and_is_negative(word)
+            (term_id, is_negative, is_word) = self.get_term(word)
             if term_id:
-                self.increment_frequency(term_id, is_negative ^ (last_negative <= NEGATIVE_SCOPE))
+                self.increment_frequency(term_id, is_negative ^ (is_word and (last_negative <= NEGATIVE_SCOPE)))
 
     def increment_frequency(self, term_id, is_negative):
         """increment frequency for a single term"""
@@ -190,14 +188,11 @@ class Tracker:
         """print an error message to a logfile"""
         logging.error('%s # %s', message, tweet)
 
-    def dump(self):
-        """dump the frequencies to a file"""
-        with open('freq_dump.pckl', 'w') as pickle_file:
-            pickle.dump(self.frequencies, pickle_file)
-tracker = None
+# globals
+the_tracker = None
 
 def main():
-    global tracker
+    global the_tracker
     usage = 'usage: %prog -d dumpfile'
     parser = optparse.OptionParser(usage=usage)
     parser.add_option('-d', '--dumpfile', action='store', type='string', dest='dump_file', default=None, help='read dumped frequencies from file')
@@ -205,7 +200,7 @@ def main():
 
     atexit.register(email_alert)
     CONFIG_FILE = 'tweet_tracker.cfg'
-    tracker = Tracker(CONFIG_FILE, options.dump_file)
+    the_tracker = pickle.load(options.dumpfile) if options.dumpfile else tracker(CONFIG_FILE)
     signal.signal(signal.SIGINT, sigint_handler) # respond to SIGINT by dumping
     try:
         tracker.crawl()
@@ -214,9 +209,10 @@ def main():
         tracker.dump()
 
 def sigint_handler(signum, frame):
-    global tracker
+    global the_tracker
     print 'handling sigint'
-    tracker.dump()
+    with open(the_tracker.dump_file, 'w') as pickle_file:
+        pickle.dump(the_tracker, pickle_file)
     sys.exit(0)
 
 def email_alert():

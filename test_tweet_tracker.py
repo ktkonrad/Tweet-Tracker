@@ -9,7 +9,7 @@ CONFIG_FILE = 'test_tweet_tracker.cfg'
 
 class TestTweetTracker(unittest.TestCase):
     def setUp(self):
-        self.tracker = tweet_tracker.Tracker(CONFIG_FILE)
+        self.tracker = tweet_tracker.tracker(CONFIG_FILE)
 
     def test_is_negative(self):
         self.assertTrue(self.tracker.is_negative('not'))
@@ -25,6 +25,7 @@ class TestTweetTracker(unittest.TestCase):
         self.assertTrue(self.tracker.is_negative("wouldnt"))
         self.assertFalse(self.tracker.is_negative('great'))
         self.assertFalse(self.tracker.is_negative('awful'))
+        # TODO emoticons
 
     def test_increment_frequency(self):
         term_id = 1
@@ -44,17 +45,22 @@ class TestTweetTracker(unittest.TestCase):
         self.tracker.increment_frequency(term_id, 1)
         self.assertEqual(self.tracker.frequencies[term_id], [0,1])
 
-        # increment positive for existing term
+        # increment negative for existing term
         self.tracker.increment_frequency(term_id, 1)
         self.assertEqual(self.tracker.frequencies[term_id], [0,2])
 
+        # cleanup
+        self.tracker.frequencies = dict()
+
     def test_increment_frequencies(self):
-        terms = ['hopeless', 'calm']
-        term_ids, term_is_negatives = zip(*map(self.tracker.get_term_id_and_is_negative, terms))
-        text = "I'm not %s. I'm just %s" % tuple(terms)
+        terms = ['hopeless', 'calm', ':)', '8)']
+        (term_ids, term_is_negatives, _) = zip(*map(self.tracker.get_term, terms))
+        text = "I'm not %s. I'm just %s %s I'm no %s" % tuple(terms)
         self.tracker.increment_frequencies(text)
         self.assertEqual(self.tracker.frequencies[term_ids[0]], [1, 0]) # double negative should be positive
         self.assertEqual(self.tracker.frequencies[term_ids[1]], [1, 0])
+        self.assertEqual(self.tracker.frequencies[term_ids[2]], [1, 0])
+        self.assertEqual(self.tracker.frequencies[term_ids[3]], [1, 0]) # negative word shouldn't affect emoticon valence
 
     def test_round_to_next_open(self):
         dt1 = datetime.datetime(2012,1,1,14,0,0)
@@ -104,15 +110,28 @@ class TestTweetTracker(unittest.TestCase):
                                           date_str)
         db_tweet_count = self.tracker.mysql_cursor.fetchone()[0]
         self.tracker.mysql_cursor.execute("""DELETE FROM `daily_data`
-                                        WHERE `date` = %s""",
-                                     date_str) # cleanup
+                                             WHERE `date` = %s""",
+                                          date_str) # cleanup
         self.assertEqual(tweet_count, db_tweet_count)
+
+    def test_get_term(self):
+        terms = ['hope', 'hopeless', ':)']
+        for term in terms:
+            self.tracker.mysql_cursor.execute("""SELECT `id`, `parent_id`, `is_negative`, `type` FROM `terms` where `term` = %s""", (term,))
+            row = self.tracker.mysql_cursor.fetchone()
+            term_id = row[1] or row[0]
+            is_negative = bool(row[2])
+            is_word = row[3] == 'word'
+            self.assertEqual((term_id, is_negative, is_word), self.tracker.get_term(term))
+            self.assertEqual((term_id, is_negative, is_word), self.tracker._term_info[term]) # make sure it gets cached correctly
+
+        
 
     def test_write_frequencies(self):
         date_str = '2012-01-01'
-        terms = ['hopeless', 'calm']
-        term_ids, term_is_negatives = zip(*map(self.tracker.get_term_id_and_is_negative, terms))
-        frequencies = [[2, 4], [3, 0]]
+        terms = ['hopeless', 'calm', ':)']
+        (term_ids, term_is_negatives, _) = zip(*map(self.tracker.get_term, terms))
+        frequencies = [[2, 4], [3, 1], [2, 0]]
         for term_id, frequency in zip(term_ids, frequencies):
             self.tracker.frequencies[term_id] = frequency
         
@@ -130,6 +149,13 @@ class TestTweetTracker(unittest.TestCase):
                                                    AND `date` = %s""",
                                               (term_id, date_str)) # cleanup
             self.assertEqual(frequency, db_frequency)
+
+    def test_strip_punctuation(self):
+        strings =          ['hello', 'hello.', 'hello!?', "didn't", "didn't?", 'mad-cool...', ':)', 'XD', ':!']
+        stripped_strings = ['hello', 'hello',  'hello',   "didn't", "didn't",  'mad-cool',    ':)', 'XD', ':!']
+        for (string, stripped_string) in zip(strings, stripped_strings):
+            self.assertEqual(stripped_string, self.tracker.strip_punctuation(string))
+
 
 if __name__ == '__main__':
     unittest.main()
