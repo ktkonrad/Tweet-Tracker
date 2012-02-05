@@ -200,13 +200,13 @@ def main():
 
     atexit.register(email_alert)
     CONFIG_FILE = 'tweet_tracker.cfg'
-    the_tracker = pickle.load(options.dumpfile) if options.dumpfile else tracker(CONFIG_FILE)
+    the_tracker = pickle.load(options.dump_file) if options.dump_file else tracker(CONFIG_FILE)
     signal.signal(signal.SIGINT, sigint_handler) # respond to SIGINT by dumping
     try:
-        tracker.crawl()
+        the_tracker.crawl()
     except Exception as e: # unhandled exception falls through to here
         print e
-        tracker.dump()
+        the_tracker.dump()
 
 def sigint_handler(signum, frame):
     global the_tracker
