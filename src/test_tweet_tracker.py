@@ -24,9 +24,7 @@ class TestTweetTracker(unittest.TestCase):
                 negatives = negativesfile.read()
             dump_file = home_dir + '/' + config.get('files', 'dump')
             log_file = home_dir + '/' + config.get('files', 'log')
-            username = config.get('user', 'username')
-            password = config.get('user', 'password')
-            self.tracker = tweet_tracker.EmotionTracker(db, negatives, username, password, ['word', 'emoticon'], dump_file, log_file)
+            self.tracker = tweet_tracker.EmotionTracker(db, negatives, ['word', 'emoticon'], dump_file, log_file)
 
     def test_is_negative(self):
         self.assertTrue(self.tracker.is_negative('not'))

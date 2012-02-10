@@ -14,7 +14,7 @@ import pymongo
 import MySQLdb
 import tweetstream
 import logging
-
+import smtplib
 
 ## helpers - move these out at some point
 utc_open_time = datetime.time(14,30,0) # 9:30am EST = 2:30pm UTC # TODO: daylight savings time
@@ -24,12 +24,11 @@ def round_to_next_open(dt):
 ## end helpers
 
 class Logger:
-
     def __init__(self, logfile):
         logging.basicConfig(filename=logfile, level=logging.DEBUG, format='%(asctime)s %(levelname)s %(message)s') # initialize logging
 
     def log(self, message, tweet=None):
-        """print an error message to a logfile"""
+        """log an error message to a logfile"""
         logging.error('%s # %s', message, tweet)
 
 
@@ -58,8 +57,6 @@ class Database:
     mysql and mongo dbs
     Not thread-safe
     """
-
-
     def __init__(self, mysql_user, mysql_password, mysql_host='localhost', mysql_db='tweets', mongo_host='localhost', mongo_db='tweets', mongo_port=27017,):
         # connect to mongo
         mongo_connection = pymongo.Connection(mongo_host, mongo_port)
@@ -87,15 +84,26 @@ class Database:
     def get_terms(self, term_types=[]):
         return [row[0] for row in self.mysql_fetchall("SELECT `term` FROM `terms`" + ("WHERE `type` in ('%s')" % ("','".join(term_types)) if term_types else ""))]
 
+class Crawler:
+    """Stream tweets from twitter and execute callbacks"""
+    def __init__(self, stream, observers):
+        self.stream = stream
+        self.observers = observers
 
+    def crawl(self):
+        for tweet in self.stream.tweets():
+            for observer in self.observers: # TODO: have a thread for each
+                try:
+                    observer(tweet)
+                except TypeError as e:
+                    raise e
 
 class Tracker:
-    def __init__(self, db, negatives, username, password, term_types=[], dump_file='tracker.pckl', log_file = 'tracker.log'):
+    def __init__(self, db, negatives, logger, term_types=[], dump_file='tracker.pckl', (frequencies, tweet_count)=({},0)):
         self.db = db
         self.negatives = negatives
         self.terms = self.db.get_terms(term_types)
-        self.logger = Logger(log_file)
-        self.stream = Stream(username, password, self.terms, self.logger)
+        self.logger = logger
         self.dump_file = dump_file
 
         # don't access directly. use get_term
@@ -104,16 +112,30 @@ class Tracker:
 
         # initialize other stuff
         self.last_date = None
-        self.tweet_count = 0
-        self.frequencies = dict()
+        self.frequencies = frequencies
+        self.tweet_count = tweet_count
 
+    def get_term(self, term):
+        """return id (or None if term is not a term), term.is_negative, term.type
+           does a mysql query and memoizes in self._term_info
+        """
+        try:
+            (term_id, is_negative, is_word) = self._term_info[term]
+            if not term_id:
+                row = self.db.mysql_fetchone("""SELECT `id`, `is_negative`, `type` FROM `terms` where `term` = %s""", (term,))
+                term_id = row[0]
+                is_negative = bool(row[1])
+                is_word = row[2]
+                self._term_info[term] = (term_id, is_negative, is_word)
+            return (term_id, is_negative, is_word)
+        except KeyError:
+            return (None, None, None)
 
 
     def strip_punctuation(self, word):
         """strip trailing punctuation from a word"""
         m = re.match("([a-zA-Z\-']+)[\.,!\?;:]", word)
         return m.groups()[0] if m else word
-
 
     def is_negative(self, word):
         """return whether a word is negative
@@ -134,26 +156,27 @@ class Tracker:
             except KeyError:
                 self.frequencies[term_id] = [1, 0]
 
-    def crawl(self):
-        """stream tweets and insert into mongo and mysql"""
-        for tweet in self.stream.tweets:
-            self.handle_tweet(tweet)
+    def dump(self):
+        with open(self.dump_file, 'w') as pickle_file:
+            pickle.dump((self.frequencies, self.tweet_count), pickle_file)
+
+    def save_tweet(self, tweet):
+        self.db.mongo_insert(tweet) # TODO handle exceptions here
             
     def handle_tweet(self, tweet):
-        self.mongo.tweets.insert(tweet) # TODO handle exceptions here
         try:
             text = tweet['text']
         except KeyError:
             self.logger.log('No text', tweet)
-        else:
-            self.tweet_count += 1
-            now_date = round_to_next_open(datetime.datetime.utcnow())
-            if now_date != self.last_date:
-                if self.last_date:
-                    self.end_day(self.last_date)
-                self.start_day(now_date, tweet['id'])
-            self.increment_frequencies(text)
-            self.last_date = now_date
+            return
+        self.tweet_count += 1
+        now_date = round_to_next_open(datetime.datetime.utcnow())
+        if now_date != self.last_date:
+            if self.last_date:
+                self.end_day(self.last_date)
+            self.start_day(now_date, tweet['id'])
+        self.increment_frequencies(text)
+        self.last_date = now_date
 
     def start_day(self, date_str, first_tweet_id):
         try:
@@ -182,9 +205,14 @@ class Tracker:
                                      (`date`, `tweets_pulled`, `tracker_class`)
                                      VALUES(%s, %s, %s)""",
                                   (date_str, self.tweet_count, self.__class__.__name__))
-        self.write_frequencies(date_str)
-        self.tweet_count = 0
-        self.frequencies = dict()
+        try:
+            self.write_frequencies(date_str)
+            self.tweet_count = 0
+            self.frequencies = dict()
+        except Exception as e:
+            self.logger.log(e)
+            self.dump()
+
 
     def write_frequencies(self, date_str):
         """
@@ -199,23 +227,6 @@ class Tracker:
 
 class EmotionTracker(Tracker):
     """Tracker subclass for tracking emotional words and emoticons"""
-    def get_term(self, term):
-        """return id (or None if term is not a term), term.is_negative, term.is_word
-           does a mysql query and memoizes in self._term_info
-        """
-        try:
-            (term_id, is_negative, is_word) = self._term_info[term]
-            if not term_id:
-                row = self.db.mysql_fetchone("""SELECT `id`, `is_negative`, `type` FROM `terms` where `term` = %s""", (term,))
-                term_id = row[0]
-                is_negative = bool(row[1])
-                is_word = row[2] == 'word'
-                self._term_info[term] = (term_id, is_negative, is_word)
-            return (term_id, is_negative, is_word)
-        except KeyError:
-            return (None, None, None)
-
-
     def increment_frequencies(self, text):
         """increment frequencies for all words in text"""
         NEGATIVE_SCOPE = 2 # negative word applies to next 2 words
@@ -227,45 +238,67 @@ class EmotionTracker(Tracker):
                 last_negative = 0
             else:
                 last_negative += 1
-            (term_id, is_negative, is_word) = self.get_term(word)
+            (term_id, is_negative, term_type) = self.get_term(word)
             if term_id:
-                self.increment_frequency(term_id, is_negative ^ (is_word and (last_negative <= NEGATIVE_SCOPE)))
+                self.increment_frequency(term_id, is_negative ^ (term_type == 'word' and (last_negative <= NEGATIVE_SCOPE)))
 
 
-
-# globals
-the_tracker = None
 
 def main():
-    global the_tracker
+    global emotion_tracker
+
+    # parse command line options
     usage = 'usage: %prog -d dumpfile'
     parser = optparse.OptionParser(usage=usage)
     parser.add_option('-d', '--dumpfile', action='store', type='string', dest='dump_file', default=None, help='read dumped frequencies from file')
     (options, args) = parser.parse_args()
 
+    # register callbacks for exit and interrupt
     atexit.register(email_alert)
+    signal.signal(signal.SIGINT, sigint_handler) # respond to SIGINT by dumping
+
+    # get config stuff
     CONFIG_FILE = '../config/tweet_tracker.cfg'
+    config = ConfigParser.ConfigParser()
+    with open(CONFIG_FILE) as configfile:
+        config.readfp(configfile)
+        mysql_user = config.get('mysql', 'user')
+        mysql_password = config.get('mysql', 'password')
+        home_dir = config.get('dirs', 'home')
+        negatives_file = home_dir + '/' + config.get('files', 'negatives')
+        log_file = home_dir + '/' + config.get('files', 'log')
+        dump_file = home_dir + '/' + config.get('files', 'dump')
+        twitter_user = config.get('twitter', 'user')
+        twitter_password = config.get('twitter', 'password')
+
+
+    with open(negatives_file) as negativesfile:
+        negatives = negativesfile.read()
+
+    # read dump if specified in command line args
     if options.dump_file:
         with open(options.dump_file) as dumpfile:
-            the_tracker = pickle.load(options.dump_file)
+            dump = pickle.load(dumpfile)
     else:
-        the_tracker = tracker(CONFIG_FILE)
-    signal.signal(signal.SIGINT, sigint_handler) # respond to SIGINT by dumping
-    try:
-        the_tracker.crawl()
-    except Exception as e: # unhandled exception falls through to here
-        print e
-        dump()
+        dump = ({},0)
+
+    
+    # create all the pieces
+    logger          = Logger(log_file)
+    db              = Database(mysql_user, mysql_password)    
+    emotion_tracker = EmotionTracker(db, negatives, logger, ['word', 'emoticon'], dump_file, dump)
+    emotion_stream  = Stream(twitter_user, twitter_password, emotion_tracker.terms, logger)
+    emotion_crawler = Crawler(emotion_stream, [emotion_tracker.save_tweet, emotion_tracker.handle_tweet])
+    
+
+    # run it
+    emotion_crawler.crawl()
+
 
 def sigint_handler(signum, frame):
-    global the_tracker
-    print 'handling sigint'
-    dump()
-    sys.exit(0)
-
-def dump():
-    with open(the_tracker.dump_file, 'w') as pickle_file:
-        pickle.dump(the_tracker, pickle_file)
+    global emotion_tracker
+    emotion_tracker.dump()
+    sys.exit(1)
 
 
 def email_alert():
