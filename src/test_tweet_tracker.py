@@ -17,14 +17,18 @@ class TestTweetTracker(unittest.TestCase):
             mysql_password = config.get('mysql', 'password')
             mysql_db = config.get('mysql', 'db')
             mongo_db = config.get('mongo', 'db')
-            db = tweet_tracker.Database(mysql_user, mysql_password, mysql_db=mysql_db, mongo_db=mongo_db)
             home_dir = config.get('dirs', 'home')
             negatives_file = home_dir + '/' + config.get('files', 'negatives')
             with open(negatives_file) as negativesfile:
-                negatives = negativesfile.read()
+                negatives = negativesfile.read().split()
             dump_file = home_dir + '/' + config.get('files', 'dump')
             log_file = home_dir + '/' + config.get('files', 'log')
-            self.tracker = tweet_tracker.EmotionTracker(db, negatives, ['word', 'emoticon'], dump_file, log_file)
+
+        db = tweet_tracker.Database(mysql_user, mysql_password, mysql_db=mysql_db, mongo_db=mongo_db)
+        logger = tweet_tracker.Logger(log_file)
+        self.tracker = tweet_tracker.EmotionTracker(db, negatives, logger, ['word', 'emoticon'], dump_file)
+        
+        self.tracker.frequencies = {} # this isn't empty sometimes for some reason. could not reproduce outside of unittest
 
     def test_is_negative(self):
         self.assertTrue(self.tracker.is_negative('not'))
@@ -65,9 +69,6 @@ class TestTweetTracker(unittest.TestCase):
         self.tracker.increment_frequency(term_id, 1)
         self.assertEqual(self.tracker.frequencies[term_id], [0,2])
 
-        # cleanup
-        self.tracker.frequencies = dict()
-
 
     def test_increment_frequency_child(self):
         (term_id, parent_id) = self.tracker.db.mysql_fetchone("SELECT `id`, `parent_id` FROM `terms` WHERE `parent_id` IS NOT NULL LIMIT 1")
@@ -95,35 +96,43 @@ class TestTweetTracker(unittest.TestCase):
     def test_start_day(self):
         date_str = '2012-01-01'
         first_tweet_id = 123456L
+
         self.tracker.start_day(date_str, first_tweet_id)
+
         (db_first_tweet_id,) = self.tracker.db.mysql_fetchone("""SELECT `first_tweet_id`
                                                                  FROM `daily_data`
                                                                  WHERE `date` = %s
                                                                    AND `tracker_class` = %s""",
                                                               (date_str, self.tracker.__class__.__name__))
+        # cleanup
         self.tracker.db.mysql_execute("""DELETE FROM `daily_data`
-                                      WHERE `date` = %s
-                                        AND `tracker_class` = %s""",
-                                      (date_str, self.tracker.__class__.__name__)) # cleanup
+                                         WHERE `date` = %s
+                                           AND `tracker_class` = %s""",
+                                      (date_str, self.tracker.__class__.__name__))
+
         self.assertEqual(first_tweet_id, db_first_tweet_id)
 
     def test_end_day(self):
         date_str = '2012-01-01'
         tweet_count = 42
+
         self.tracker.start_day(date_str, 0L)
         self.tracker.tweet_count = tweet_count
         self.tracker.end_day(date_str)
+
         self.tracker.db.mysql_cursor.execute("""SELECT `tweets_pulled`
                                                 FROM `daily_data`
                                                 WHERE `date` = %s
                                                   AND `tracker_class` = %s""",
                                              (date_str, self.tracker.__class__.__name__))
 
-        db_tweet_count = self.tracker.db.mysql_cursor.fetchone()[0]
+        (db_tweet_count,) = self.tracker.db.mysql_cursor.fetchone()
+
+        # cleanup
         self.tracker.db.mysql_cursor.execute("""DELETE FROM `daily_data`
-                                        WHERE `date` = %s
-                                          AND `tracker_class` = %s""",
-                                             (date_str, self.tracker.__class__.__name__)) # cleanup
+                                                WHERE `date` = %s
+                                                  AND `tracker_class` = %s""",
+                                             (date_str, self.tracker.__class__.__name__))
         self.assertEqual(tweet_count, db_tweet_count)
 
 
@@ -151,9 +160,9 @@ class TestTweetTracker(unittest.TestCase):
             row = self.tracker.db.mysql_fetchone("""SELECT `id`, `is_negative`, `type` FROM `terms` where `term` = %s""", (term,))
             term_id = row[0]
             is_negative = bool(row[1])
-            is_word = row[2] == 'word'
-            self.assertEqual((term_id, is_negative, is_word), self.tracker.get_term(term))
-            self.assertEqual((term_id, is_negative, is_word), self.tracker._term_info[term]) # make sure it gets cached correctly
+            term_type = row[2]
+            self.assertEqual((term_id, is_negative, term_type), self.tracker.get_term(term))
+            self.assertEqual((term_id, is_negative, term_type), self.tracker._term_info[term]) # make sure it gets cached correctly
 
         
 
@@ -173,15 +182,16 @@ class TestTweetTracker(unittest.TestCase):
                                                                   WHERE `term_id` = %s
                                                                     AND `date` = %s""",
                                                                (term_id, date_str)))
+            # cleanup
             self.tracker.db.mysql_execute("""DELETE FROM `frequencies`
                                              WHERE `term_id` = %s
                                                AND `date` = %s""",
-                                          (term_id, date_str)) # cleanup
+                                          (term_id, date_str))
             self.assertEqual(frequency, db_frequency)
 
     def test_strip_punctuation(self):
-        strings =          ['hello', 'hello.', 'hello!?', "didn't", "didn't?", 'mad-cool...', ':)', 'XD', ':!']
-        stripped_strings = ['hello', 'hello',  'hello',   "didn't", "didn't",  'mad-cool',    ':)', 'XD', ':!']
+        strings          = ['hello', 'hello.', 'hello!?', "didn't", "didn't?", 'mad-cool...', ':)', 'XD', ':!', '#great']
+        stripped_strings = ['hello', 'hello',  'hello',   "didn't", "didn't",  'mad-cool',    ':)', 'XD', ':!', '#great']
         for (string, stripped_string) in zip(strings, stripped_strings):
             self.assertEqual(stripped_string, self.tracker.strip_punctuation(string))
 

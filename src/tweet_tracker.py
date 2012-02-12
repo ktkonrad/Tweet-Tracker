@@ -134,7 +134,7 @@ class Tracker:
 
     def strip_punctuation(self, word):
         """strip trailing punctuation from a word"""
-        m = re.match("([a-zA-Z\-']+)[\.,!\?;:]", word)
+        m = re.match("(#?[a-zA-Z\-']+)[\.,!\?;:]", word)
         return m.groups()[0] if m else word
 
     def is_negative(self, word):
