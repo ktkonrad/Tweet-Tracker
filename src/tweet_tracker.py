@@ -133,7 +133,7 @@ class Tracker:
 
 
     def strip_punctuation(self, word):
-        """strip trailing punctuation from a word"""
+        """strip trailing punctuation from a word or hashtag"""
         m = re.match("(#?[a-zA-Z\-']+)[\.,!\?;:]", word)
         return m.groups()[0] if m else word
 
@@ -143,18 +143,29 @@ class Tracker:
         """
         return word in self.negatives
 
-    def increment_frequency(self, term_id, is_negative):
+    def is_hashtag(self, word):
+        """return whether a word is a hashtag"""
+        return word[0] == '#'
+
+    def increment_frequency(self, term_id, component):
         """increment frequency for a single term"""
-        if is_negative:
-            try:
-                self.frequencies[term_id][1] += 1
-            except KeyError:
-                self.frequencies[term_id] = [0, 1]
-        else:
+        if component == 'positive':
             try:
                 self.frequencies[term_id][0] += 1
             except KeyError:
-                self.frequencies[term_id] = [1, 0]
+                self.frequencies[term_id] = [1, 0, 0]
+        elif component == 'negative':
+            try:
+                self.frequencies[term_id][1] += 1
+            except KeyError:
+                self.frequencies[term_id] = [0, 1, 0]
+        elif component == 'hashtag':
+            try:
+                self.frequencies[term_id][2] += 1
+            except KeyError:
+                self.frequencies[term_id] = [0, 0, 1]
+        else:
+            raise ArgumentError('unknown component %s' % component)
 
     def dump(self):
         with open(self.dump_file, 'w') as pickle_file:
@@ -218,11 +229,11 @@ class Tracker:
         """
         write all the frequencies to sql
         """
-        for (term_id, [positive, negative]) in self.frequencies.iteritems():
+        for (term_id, [positive, negative, hashtag]) in self.frequencies.iteritems():
             self.db.mysql_execute("""INSERT INTO `frequencies`
-                                     (`term_id`, `date`, `positive`, `negative`)
-                                     VALUES(%s, %s, %s, %s)""",
-                                  (term_id, date_str, positive, negative))
+                                     (`term_id`, `date`, `positive`, `negative`, `hashtag`)
+                                     VALUES(%s, %s, %s, %s, %s)""",
+                                  (term_id, date_str, positive, negative, hashtag))
 
 
 class EmotionTracker(Tracker):
@@ -234,13 +245,28 @@ class EmotionTracker(Tracker):
         last_negative = NEGATIVE_SCOPE + 1
         # TODO: trie matching
         for word in map(self.strip_punctuation, text.split()):
+            # check for negative word
             if self.is_negative(word):
                 last_negative = 0
             else:
                 last_negative += 1
-            (term_id, is_negative, term_type) = self.get_term(word)
+
+            # get term info
+            if self.is_hashtag(word):
+                (term_id, is_negative, term_type) = self.get_term(word[1:])
+            else:
+                (term_id, is_negative, term_type) = self.get_term(word)
+                
+            # increment frequency
             if term_id:
-                self.increment_frequency(term_id, is_negative ^ (term_type == 'word' and (last_negative <= NEGATIVE_SCOPE)))
+                if self.is_hashtag(word):
+                    component = 'hashtag'
+                elif is_negative ^ (term_type == 'word' and (last_negative <= NEGATIVE_SCOPE)):
+                    component = 'negative'
+                else:
+                    component = 'positive'
+
+                self.increment_frequency(term_id, component)
 
 
 

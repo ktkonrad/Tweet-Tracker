@@ -47,45 +47,58 @@ class TestTweetTracker(unittest.TestCase):
         self.assertFalse(self.tracker.is_negative(':)'))
         self.assertFalse(self.tracker.is_negative(':('))
 
-    def test_increment_frequency_parent(self):
+    def test_increment_frequency_parent_positive(self):
         term_id = self.tracker.db.mysql_fetchone("SELECT `id` FROM `terms` WHERE `parent_id` IS NULL LIMIT 1")[0]
         
         # increment positive for new term
-        self.tracker.increment_frequency(term_id, 0)
-        self.assertEqual(self.tracker.frequencies[term_id], [1,0])
+        self.tracker.increment_frequency(term_id, 'positive')
+        self.assertEqual(self.tracker.frequencies[term_id], [1,0,0])
         self.assertEqual(self.tracker.frequencies.keys(), [term_id])
 
         # increment positive for existing term
-        self.tracker.increment_frequency(term_id, 0)
-        self.assertEqual(self.tracker.frequencies[term_id], [2,0])
+        self.tracker.increment_frequency(term_id, 'positive')
+        self.assertEqual(self.tracker.frequencies[term_id], [2,0,0])
         self.assertEqual(self.tracker.frequencies.keys(), [term_id])
 
-        term_id = 2
+    def test_increment_frequency_parent_negative(self):
+        term_id = self.tracker.db.mysql_fetchone("SELECT `id` FROM `terms` WHERE `parent_id` IS NULL LIMIT 1")[0]
+
         # increment negative for new term
-        self.tracker.increment_frequency(term_id, 1)
-        self.assertEqual(self.tracker.frequencies[term_id], [0,1])
+        self.tracker.increment_frequency(term_id, 'negative')
+        self.assertEqual(self.tracker.frequencies[term_id], [0,1,0])
 
         # increment negative for existing term
-        self.tracker.increment_frequency(term_id, 1)
-        self.assertEqual(self.tracker.frequencies[term_id], [0,2])
+        self.tracker.increment_frequency(term_id, 'negative')
+        self.assertEqual(self.tracker.frequencies[term_id], [0,2,0])
 
+    def test_increment_frequency_parent_hashtag(self):
+        term_id = self.tracker.db.mysql_fetchone("SELECT `id` FROM `terms` WHERE `parent_id` IS NULL LIMIT 1")[0]
+
+        # increment negative for new term
+        self.tracker.increment_frequency(term_id, 'hashtag')
+        self.assertEqual(self.tracker.frequencies[term_id], [0,0,1])
+
+        # increment negative for existing term
+        self.tracker.increment_frequency(term_id, 'hashtag')
+        self.assertEqual(self.tracker.frequencies[term_id], [0,0,2])
 
     def test_increment_frequency_child(self):
         (term_id, parent_id) = self.tracker.db.mysql_fetchone("SELECT `id`, `parent_id` FROM `terms` WHERE `parent_id` IS NOT NULL LIMIT 1")
         # increment positive for child term
-        self.tracker.increment_frequency(term_id, 0)
-        self.assertEqual(self.tracker.frequencies[term_id], [1,0])
+        self.tracker.increment_frequency(term_id, 'positive')
+        self.assertEqual(self.tracker.frequencies[term_id], [1,0,0])
         self.assertNotIn(parent_id, self.tracker.frequencies.keys())
 
     def test_increment_frequencies(self):
-        terms = ['hopeless', 'calm', ':)', '8)']
+        terms = ['hopeless', 'calm', ':)', '8)', 'worry']
         (term_ids, term_is_negatives, _) = zip(*map(self.tracker.get_term, terms))
-        text = "I'm not %s. I'm just %s %s I'm no %s" % tuple(terms)
+        text = "I'm not %s. I'm just %s %s I'm no %s #%s" % tuple(terms)
         self.tracker.increment_frequencies(text)
-        self.assertEqual(self.tracker.frequencies[term_ids[0]], [1, 0]) # double negative should be positive
-        self.assertEqual(self.tracker.frequencies[term_ids[1]], [1, 0])
-        self.assertEqual(self.tracker.frequencies[term_ids[2]], [1, 0])
-        self.assertEqual(self.tracker.frequencies[term_ids[3]], [1, 0]) # negative word shouldn't affect emoticon valence
+        self.assertEqual(self.tracker.frequencies[term_ids[0]], [1,0,0]) # double negative should be positive
+        self.assertEqual(self.tracker.frequencies[term_ids[1]], [1,0,0])
+        self.assertEqual(self.tracker.frequencies[term_ids[2]], [1,0,0])
+        self.assertEqual(self.tracker.frequencies[term_ids[3]], [1,0,0]) # negative word shouldn't affect emoticon valence
+        self.assertEqual(self.tracker.frequencies[term_ids[4]], [0,0,1]) # hashtag
 
     def test_round_to_next_open(self):
         dt1 = datetime.datetime(2012,1,1,14,0,0)
@@ -170,14 +183,14 @@ class TestTweetTracker(unittest.TestCase):
         date_str = '2012-01-01'
         terms = ['hopeless', 'calm', ':)']
         (term_ids, term_is_negatives, _) = zip(*map(self.tracker.get_term, terms))
-        frequencies = [[2, 4], [3, 1], [2, 0]]
+        frequencies = [[2, 4, 0], [3, 1, 2], [2, 0, 1]]
         for term_id, frequency in zip(term_ids, frequencies):
             self.tracker.frequencies[term_id] = frequency
         
         self.tracker.write_frequencies(date_str)
         
         for term_id, frequency in zip(term_ids, frequencies):
-            db_frequency = list(self.tracker.db.mysql_fetchone("""SELECT `positive`, `negative`
+            db_frequency = list(self.tracker.db.mysql_fetchone("""SELECT `positive`, `negative`, `hashtag`
                                                                   FROM `frequencies`
                                                                   WHERE `term_id` = %s
                                                                     AND `date` = %s""",
