@@ -1,0 +1,35 @@
+djia
++dow
++dow jones
+bear market
++bearish
+bull market
++bullish
+finance news
++financial news
+sp500
++s&p
++s&p 500
+market crash
++stock market crash
+wall street
++wall street news
+best stock
+finance
+financial market
+long stock
+short stock
+nasdaq
+volatility
+financial risk
+stock
+stock market
+stock market news
+stock market today
+stock price
+stock to buy
+buy stock
+sell stock
+bankruptcy
+recession
+gold

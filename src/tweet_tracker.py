@@ -107,7 +107,7 @@ class Tracker:
         self.dump_file = dump_file
 
         # don't access directly. use get_term
-        # term : (term_id, is_negative, is_word)
+        # term : (term_id, is_negative, type)
         self._term_info = dict([(term, (None, None, None)) for term in self.terms])
 
         # initialize other stuff
@@ -119,6 +119,7 @@ class Tracker:
         """return id (or None if term is not a term), term.is_negative, term.type
            does a mysql query and memoizes in self._term_info
         """
+        term = term[1:] if term[0] == '#' else term
         try:
             (term_id, is_negative, is_word) = self._term_info[term]
             if not term_id:
@@ -145,7 +146,7 @@ class Tracker:
 
     def is_hashtag(self, word):
         """return whether a word is a hashtag"""
-        return word[0] == '#'
+        return bool(re.match('#[a-zA-Z]', word))
 
     def increment_frequency(self, term_id, component):
         """increment frequency for a single term"""
@@ -244,7 +245,7 @@ class EmotionTracker(Tracker):
 
         last_negative = NEGATIVE_SCOPE + 1
         # TODO: trie matching
-        for word in map(self.strip_punctuation, text.split()):
+        for word in map(self.strip_punctuation, text.lower().split()):
             # check for negative word
             if self.is_negative(word):
                 last_negative = 0
@@ -252,10 +253,7 @@ class EmotionTracker(Tracker):
                 last_negative += 1
 
             # get term info
-            if self.is_hashtag(word):
-                (term_id, is_negative, term_type) = self.get_term(word[1:])
-            else:
-                (term_id, is_negative, term_type) = self.get_term(word)
+            (term_id, is_negative, term_type) = self.get_term(word)
                 
             # increment frequency
             if term_id:
@@ -269,7 +267,52 @@ class EmotionTracker(Tracker):
                 self.increment_frequency(term_id, component)
 
 
+class MarketTracker(Tracker):
+    """
+    Tracker subclass for tracking market terms
+    works with n-grams for n=1,2,3
+    """
 
+    def grouped_ngrams(self, words, n_max):
+        """
+        split text into n-grams for n = 1 to n_max
+        yields groups as lists
+        """
+        wordcount = len(words)
+        for i in xrange(wordcount):
+            yield [' '.join(words[i:j]) for j in xrange(i+1, min(wordcount, i+n_max)+1)]
+
+    def last_truthy_index(self, arr):
+        """
+        return the index of the last truthy element in arr
+        """
+        try:
+            return [i for (i,x) in enumerate(arr) if x][-1]
+        except IndexError:
+            return None
+
+    def increment_frequencies(self, text):
+        """
+        break text into n-grams and increment frequencies
+        only use longest n-gram if contained n-grams match
+        """
+        N = 3 # check for n-grams up to N
+
+        words = map(self.strip_punctuation, text.lower().split())
+
+        last_match_prev = 0
+        for gram_group in self.grouped_ngrams(words, N):
+            # get term info
+            term_ids = [i for i,_,_ in map(self.get_term, gram_group)]
+            
+            last_match = self.last_truthy_index(term_ids) # can be None
+            
+            if last_match >= last_match_prev : # all numbers are greater than None
+                component = 'hashtag' if self.is_hashtag(gram_group[last_match]) else 'positive'
+                self.increment_frequency(term_ids[last_match], component)
+
+            last_match_prev = last_match or 0
+            
 def main():
     global emotion_tracker
 

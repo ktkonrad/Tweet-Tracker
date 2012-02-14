@@ -8,7 +8,7 @@ import ConfigParser
 
 CONFIG_FILE = '../config/test_tweet_tracker.cfg'
 
-class TestTweetTracker(unittest.TestCase):
+class TestEmotionTracker(unittest.TestCase):
     def setUp(self):
         config = ConfigParser.ConfigParser()
         with open(CONFIG_FILE) as configfile:
@@ -208,6 +208,52 @@ class TestTweetTracker(unittest.TestCase):
         for (string, stripped_string) in zip(strings, stripped_strings):
             self.assertEqual(stripped_string, self.tracker.strip_punctuation(string))
 
+class TestMarketTracker(unittest.TestCase):
+    def setUp(self):
+        config = ConfigParser.ConfigParser()
+        with open(CONFIG_FILE) as configfile:
+            config.readfp(configfile)
+            mysql_user = config.get('mysql', 'user')
+            mysql_password = config.get('mysql', 'password')
+            mysql_db = config.get('mysql', 'db')
+            mongo_db = config.get('mongo', 'db')
+            home_dir = config.get('dirs', 'home')
+            negatives_file = home_dir + '/' + config.get('files', 'negatives')
+            with open(negatives_file) as negativesfile:
+                negatives = negativesfile.read().split()
+            dump_file = home_dir + '/' + config.get('files', 'dump')
+            log_file = home_dir + '/' + config.get('files', 'log')
+
+        db = tweet_tracker.Database(mysql_user, mysql_password, mysql_db=mysql_db, mongo_db=mongo_db)
+        logger = tweet_tracker.Logger(log_file)
+        self.tracker = tweet_tracker.MarketTracker(db, negatives, logger, ['market'], dump_file)
+        
+        self.tracker.frequencies = {} # this isn't empty sometimes for some reason. could not reproduce outside of unittest
+
+    def test_grouped_ngrams(self):
+        words = ['a','b','c','d','e']
+        n_max = 3
+        my_groups = [['a', 'a b', 'a b c'], ['b', 'b c', 'b c d'], ['c', 'c d', 'c d e'], ['d', 'd e'], ['e']]
+        groups = list(self.tracker.grouped_ngrams(words, n_max))
+        self.assertEqual(my_groups, groups)
+
+    def test_last_truthy_index(self):
+        arr = [None, None, 23, None, 11, None, None]
+        last_truthy_index = 4
+        self.assertEqual(last_truthy_index, self.tracker.last_truthy_index(arr))
+        
+    def test_increment_frequencies(self):
+        terms = ['djia', 'stock market crash', 'gold']
+        subterms = ['stock market', 'market crash']
+        (term_ids, term_is_negatives, _) = zip(*map(self.tracker.get_term, terms))
+        (subterm_ids, _, _) = zip(*map(self.tracker.get_term, subterms))
+        text = "the %s sucks after the %s. buy #%s" % tuple(terms)
+        self.tracker.increment_frequencies(text)
+        self.assertEqual(self.tracker.frequencies[term_ids[0]], [1,0,0])
+        self.assertEqual(self.tracker.frequencies[term_ids[1]], [1,0,0])
+        self.assertEqual(self.tracker.frequencies[term_ids[2]], [0,0,1]) # hashtag
+        self.assertNotIn(subterm_ids[0], self.tracker.frequencies.keys()) # subterms shouldn't get incremented
+        self.assertNotIn(subterm_ids[1], self.tracker.frequencies.keys()) # subterms shouldn't get incremented
 
 if __name__ == '__main__':
     unittest.main()
