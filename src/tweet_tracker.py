@@ -355,9 +355,14 @@ def main():
     # create all the pieces
     logger          = Logger(log_file)
     db              = Database(mysql_user, mysql_password)    
+
     emotion_tracker = EmotionTracker(db, negatives, logger, ['word', 'emoticon'], dump_file, dump)
     emotion_stream  = Stream(twitter_user, twitter_password, emotion_tracker.terms, logger)
     emotion_crawler = Crawler(emotion_stream, [emotion_tracker.save_tweet, emotion_tracker.handle_tweet])
+
+    market_tracker = MarketTracker(db, negatives, logger, ['market'], dump_file, dump)
+    market_stream  = Stream(twitter_user, twitter_password, market_tracker.terms, logger)
+    market_crawler = Crawler(market_stream, [market_tracker.save_tweet, market_tracker.handle_tweet])
     
 
     # run it

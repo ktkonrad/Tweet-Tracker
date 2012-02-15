@@ -1,6 +1,7 @@
 djia
 +dow
 +dow jones
++dow jones industrial
 bear market
 +bearish
 bull market
@@ -10,6 +11,7 @@ finance news
 sp500
 +s&p
 +s&p 500
++s&p500
 market crash
 +stock market crash
 wall street
