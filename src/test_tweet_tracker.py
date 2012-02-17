@@ -4,6 +4,7 @@ import unittest
 import tweet_tracker
 import datetime
 import ConfigParser
+import multiprocessing
 
 
 CONFIG_FILE = '../config/test_tweet_tracker.cfg'
@@ -24,7 +25,8 @@ class TestEmotionTracker(unittest.TestCase):
             dump_file = home_dir + '/' + config.get('files', 'dump')
             log_file = home_dir + '/' + config.get('files', 'log')
 
-        db = tweet_tracker.Database(mysql_user, mysql_password, mysql_db=mysql_db, mongo_db=mongo_db)
+        db_lock = multiprocessing.Lock()
+        db = tweet_tracker.Database(db_lock, mysql_user, mysql_password, mysql_db=mysql_db, mongo_db=mongo_db)
         logger = tweet_tracker.Logger(log_file)
         self.tracker = tweet_tracker.EmotionTracker(db, negatives, logger, ['word', 'emoticon'], dump_file)
         
@@ -224,7 +226,8 @@ class TestMarketTracker(unittest.TestCase):
             dump_file = home_dir + '/' + config.get('files', 'dump')
             log_file = home_dir + '/' + config.get('files', 'log')
 
-        db = tweet_tracker.Database(mysql_user, mysql_password, mysql_db=mysql_db, mongo_db=mongo_db)
+        db_lock = multiprocessing.Lock()
+        db = tweet_tracker.Database(db_lock, mysql_user, mysql_password, mysql_db=mysql_db, mongo_db=mongo_db)
         logger = tweet_tracker.Logger(log_file)
         self.tracker = tweet_tracker.MarketTracker(db, negatives, logger, ['market'], dump_file)
         

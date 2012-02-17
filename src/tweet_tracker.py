@@ -1,11 +1,6 @@
 #!/usr/bin/env python
 
-import ConfigParser
-
 import datetime
-import atexit
-import signal
-import optparse
 import sys
 import pickle
 import re
@@ -57,7 +52,9 @@ class Database:
     mysql and mongo dbs
     Not thread-safe
     """
-    def __init__(self, mysql_user, mysql_password, mysql_host='localhost', mysql_db='tweets', mongo_host='localhost', mongo_db='tweets', mongo_port=27017,):
+    def __init__(self, lock, mysql_user, mysql_password, mysql_host='localhost', mysql_db='tweets', mongo_host='localhost', mongo_db='tweets', mongo_port=27017,):
+        self.lock = lock
+
         # connect to mongo
         mongo_connection = pymongo.Connection(mongo_host, mongo_port)
         self.mongo = mongo_connection[mongo_db]
@@ -71,7 +68,9 @@ class Database:
         self.mongo.tweets.insert(tweet)
 
     def mysql_execute(self, query, params=None):
+        self.lock.acquire()
         self.mysql_cursor.execute(query, params)
+        self.lock.release()
 
     def mysql_fetchone(self, query, params=None):
         self.mysql_cursor.execute(query, params)
@@ -95,11 +94,12 @@ class Crawler:
             for observer in self.observers: # TODO: have a thread for each
                 try:
                     observer(tweet)
-                except TypeError as e:
+                except: # catch any unhandled exceptions in observer
+                    email_alert()
                     raise e
 
 class Tracker:
-    def __init__(self, db, negatives, logger, term_types=[], dump_file='tracker.pckl', (frequencies, tweet_count)=({},0)):
+    def __init__(self, db, negatives, logger, term_types, dump_file, (frequencies, tweet_count)=({},0)):
         self.db = db
         self.negatives = negatives
         self.terms = self.db.get_terms(term_types)
@@ -313,67 +313,6 @@ class MarketTracker(Tracker):
 
             last_match_prev = last_match or 0
             
-def main():
-    global emotion_tracker
-
-    # parse command line options
-    usage = 'usage: %prog -d dumpfile'
-    parser = optparse.OptionParser(usage=usage)
-    parser.add_option('-d', '--dumpfile', action='store', type='string', dest='dump_file', default=None, help='read dumped frequencies from file')
-    (options, args) = parser.parse_args()
-
-    # register callbacks for exit and interrupt
-    atexit.register(email_alert)
-    signal.signal(signal.SIGINT, sigint_handler) # respond to SIGINT by dumping
-
-    # get config stuff
-    CONFIG_FILE = '../config/tweet_tracker.cfg'
-    config = ConfigParser.ConfigParser()
-    with open(CONFIG_FILE) as configfile:
-        config.readfp(configfile)
-        mysql_user = config.get('mysql', 'user')
-        mysql_password = config.get('mysql', 'password')
-        home_dir = config.get('dirs', 'home')
-        negatives_file = home_dir + '/' + config.get('files', 'negatives')
-        log_file = home_dir + '/' + config.get('files', 'log')
-        dump_file = home_dir + '/' + config.get('files', 'dump')
-        twitter_user = config.get('twitter', 'user')
-        twitter_password = config.get('twitter', 'password')
-
-
-    with open(negatives_file) as negativesfile:
-        negatives = negativesfile.read()
-
-    # read dump if specified in command line args
-    if options.dump_file:
-        with open(options.dump_file) as dumpfile:
-            dump = pickle.load(dumpfile)
-    else:
-        dump = ({},0)
-
-    
-    # create all the pieces
-    logger          = Logger(log_file)
-    db              = Database(mysql_user, mysql_password)    
-
-    emotion_tracker = EmotionTracker(db, negatives, logger, ['word', 'emoticon'], dump_file, dump)
-    emotion_stream  = Stream(twitter_user, twitter_password, emotion_tracker.terms, logger)
-    emotion_crawler = Crawler(emotion_stream, [emotion_tracker.save_tweet, emotion_tracker.handle_tweet])
-
-    market_tracker = MarketTracker(db, negatives, logger, ['market'], dump_file, dump)
-    market_stream  = Stream(twitter_user, twitter_password, market_tracker.terms, logger)
-    market_crawler = Crawler(market_stream, [market_tracker.save_tweet, market_tracker.handle_tweet])
-    
-
-    # run it
-    emotion_crawler.crawl()
-
-
-def sigint_handler(signum, frame):
-    global emotion_tracker
-    emotion_tracker.dump()
-    sys.exit(1)
-
 
 def email_alert():
     from email.mime.text import MIMEText
@@ -391,31 +330,3 @@ def email_alert():
     s = smtplib.SMTP('localhost')
     s.sendmail(from_email, to_emails, message.as_string())
     s.quit()
-
-if __name__ == "__main__":
-    main()
-        
-
-#        # get config stuff
-#        config = ConfigParser.ConfigParser()
-#        with open(config_file) as configfile:
-#            config.readfp(configfile)
-#            self.home_dir = config.get('dirs', 'home')
-#            with open(self.home_dir + '/terms/' + config.get('files', 'negatives')) as negatives_file:
-#                self.negatives = negatives_file.read().split()
-#            
-#            self.dump_file = self.home_dir + '/data/' + config.get('files', 'dump')
-#                
-#            # connect to mongo
-#            mongo_connection = pymongo.Connection(config.get('mongo', 'host'), int(config.get('mongo', 'port')))
-#            self.mongo = mongo_connection[config.get('mongo', 'db')]
-#
-#            # connect to mysql
-#            self.mysql = MySQLdb.connect(user='tracker', passwd=self.password, db=config.get('mysql', 'db'))
-#            self.mysql_cursor = self.mysql.cursor()
-#
-#            # get terms from mysql
-#            self.mysql_cursor.execute("SELECT `term` FROM `terms`")
-#            self.terms = [row[0] for row in self.mysql_cursor.fetchall()]
-#
-#            self.stream = Stream(config.get('user', 'username'), config.get('user', 'password'), self.terms)
