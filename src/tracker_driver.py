@@ -44,6 +44,7 @@ def spawn(class, dump_file, db_lock):
         mysql_user = config.get('mysql', 'user')
         mysql_password = config.get('mysql', 'password')
         home_dir = config.get('dirs', 'home')
+        tweet_dir = home_dir + '/' + config.get('dirs', 'tweets')
         negatives_file = home_dir + '/' + config.get('files', 'negatives')
         log_file = home_dir + '/' + config.get('files', 'log')
         dump_file = home_dir + '/' + config.get('files', 'dump')
@@ -64,9 +65,9 @@ def spawn(class, dump_file, db_lock):
     logger          = Logger(log_file)
     db              = Database(db_lock, mysql_user, mysql_password)
     if class == 'emotion':
-        tracker = EmotionTracker(db, negatives, logger, ['word', 'emoticon'], dump_file, dump)
+        tracker = EmotionTracker(db, negatives, logger, ['word', 'emoticon'], dump_file, tweet_file, dump)
     elif class == 'market':
-        tracker = MarketTracker(db, negatives, logger, ['market'], dump_file, dump)
+        tracker = MarketTracker(db, negatives, logger, ['market'], dump_file, tweet_file, dump)
     else:
         raise ArgumentError('unknown class %s' % class)
     stream  = Stream(twitter_user, twitter_password, tracker.terms, logger)

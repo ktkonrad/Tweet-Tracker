@@ -4,8 +4,7 @@ import datetime
 import sys
 import pickle
 import re
-
-import pymongo
+import gzip
 import MySQLdb
 import tweetstream
 import logging
@@ -49,24 +48,16 @@ class Stream:
 
 class Database:
     """
-    mysql and mongo dbs
-    Not thread-safe
+    mysql db
+    thread-safe
     """
-    def __init__(self, lock, mysql_user, mysql_password, mysql_host='localhost', mysql_db='tweets', mongo_host='localhost', mongo_db='tweets', mongo_port=27017,):
+    def __init__(self, lock, mysql_user, mysql_password, mysql_host='localhost', mysql_db='tweets'):
         self.lock = lock
-
-        # connect to mongo
-        mongo_connection = pymongo.Connection(mongo_host, mongo_port)
-        self.mongo = mongo_connection[mongo_db]
 
         # connect to mysql
         self.mysql = MySQLdb.connect(user=mysql_user, passwd=mysql_password, db=mysql_db)
         self.mysql_cursor = self.mysql.cursor()
         
-    def mongo_insert(self, tweet):
-        """insert a tweet into mongo"""
-        self.mongo.tweets.insert(tweet)
-
     def mysql_execute(self, query, params=None):
         self.lock.acquire()
         self.mysql_cursor.execute(query, params)
@@ -98,8 +89,10 @@ class Crawler:
                     email_alert()
                     raise e
 
+TWEETFILE = 'tweets.txt'
+
 class Tracker:
-    def __init__(self, db, negatives, logger, term_types, dump_file, (frequencies, tweet_count)=({},0)):
+    def __init__(self, db, negatives, logger, term_types, dump_file, tweet_dir, (frequencies, tweet_count)=({},0)):
         self.db = db
         self.negatives = negatives
         self.terms = self.db.get_terms(term_types)
@@ -114,6 +107,9 @@ class Tracker:
         self.last_date = None
         self.frequencies = frequencies
         self.tweet_count = tweet_count
+        self.tweet_dir = tweet_dir
+
+        self.tweetfile = open(self.tweet_dir + '/' + TWEETFILE, 'w')
 
     def get_term(self, term):
         """return id (or None if term is not a term), term.is_negative, term.type
@@ -173,7 +169,7 @@ class Tracker:
             pickle.dump((self.frequencies, self.tweet_count), pickle_file)
 
     def save_tweet(self, tweet):
-        self.db.mongo_insert(tweet) # TODO handle exceptions here
+        self.tweetfile.write(tweet) # TODO handle exceptions here
             
     def handle_tweet(self, tweet):
         try:
@@ -219,6 +215,7 @@ class Tracker:
                                   (date_str, self.tweet_count, self.__class__.__name__))
         try:
             self.write_frequencies(date_str)
+            self.rotate_tweetfile(date_str)
             self.tweet_count = 0
             self.frequencies = dict()
         except Exception as e:
@@ -235,6 +232,14 @@ class Tracker:
                                      (`term_id`, `date`, `positive`, `negative`, `hashtag`)
                                      VALUES(%s, %s, %s, %s, %s)""",
                                   (term_id, date_str, positive, negative, hashtag))
+
+    def rotate_tweetfile(self, date_str):
+        self.tweetfile.close()
+        self.tweetfile = open('%s/%s' % (self.tweet_dir, TWEETFILE), 'r+')
+        zipped = gzip.open('%s/tweets_%s.txt.gz' % (self.tweet_dir, date_str), 'wb')
+        zipped.writelines(self.tweetfile)
+        zipped.close()
+        self.tweetfile.truncate(0)
 
 
 class EmotionTracker(Tracker):

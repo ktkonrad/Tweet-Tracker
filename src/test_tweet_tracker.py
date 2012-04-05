@@ -5,7 +5,7 @@ import tweet_tracker
 import datetime
 import ConfigParser
 import multiprocessing
-
+import gzip
 
 CONFIG_FILE = '../config/test_tweet_tracker.cfg'
 
@@ -17,8 +17,8 @@ class TestEmotionTracker(unittest.TestCase):
             mysql_user = config.get('mysql', 'user')
             mysql_password = config.get('mysql', 'password')
             mysql_db = config.get('mysql', 'db')
-            mongo_db = config.get('mongo', 'db')
             home_dir = config.get('dirs', 'home')
+            tweet_dir = home_dir + '/' + config.get('dirs', 'tweets')
             negatives_file = home_dir + '/' + config.get('files', 'negatives')
             with open(negatives_file) as negativesfile:
                 negatives = negativesfile.read().split()
@@ -26,9 +26,9 @@ class TestEmotionTracker(unittest.TestCase):
             log_file = home_dir + '/' + config.get('files', 'log')
 
         db_lock = multiprocessing.Lock()
-        db = tweet_tracker.Database(db_lock, mysql_user, mysql_password, mysql_db=mysql_db, mongo_db=mongo_db)
+        db = tweet_tracker.Database(db_lock, mysql_user, mysql_password, mysql_db=mysql_db)
         logger = tweet_tracker.Logger(log_file)
-        self.tracker = tweet_tracker.EmotionTracker(db, negatives, logger, ['word', 'emoticon'], dump_file)
+        self.tracker = tweet_tracker.EmotionTracker(db, negatives, logger, ['word', 'emoticon'], dump_file, home_dir)
         
         self.tracker.frequencies = {} # this isn't empty sometimes for some reason. could not reproduce outside of unittest
 
@@ -210,6 +210,15 @@ class TestEmotionTracker(unittest.TestCase):
         for (string, stripped_string) in zip(strings, stripped_strings):
             self.assertEqual(stripped_string, self.tracker.strip_punctuation(string))
 
+    def test_rotate_tweetfile(self):
+        tweet = "this is a test"
+        date_str = '2011-01-01'
+        self.tracker.save_tweet(tweet)
+        self.tracker.rotate_tweetfile(date_str)
+        with gzip.open('%s/tweets_%s.txt.gz' % (self.tracker.tweet_dir, date_str), 'rb') as zipped:
+            read_tweet = zipped.read()
+        self.assertEqual(tweet, read_tweet)
+
 class TestMarketTracker(unittest.TestCase):
     def setUp(self):
         config = ConfigParser.ConfigParser()
@@ -218,8 +227,8 @@ class TestMarketTracker(unittest.TestCase):
             mysql_user = config.get('mysql', 'user')
             mysql_password = config.get('mysql', 'password')
             mysql_db = config.get('mysql', 'db')
-            mongo_db = config.get('mongo', 'db')
             home_dir = config.get('dirs', 'home')
+            tweet_dir = home_dir + '/' + config.get('dirs', 'tweets')
             negatives_file = home_dir + '/' + config.get('files', 'negatives')
             with open(negatives_file) as negativesfile:
                 negatives = negativesfile.read().split()
@@ -227,9 +236,9 @@ class TestMarketTracker(unittest.TestCase):
             log_file = home_dir + '/' + config.get('files', 'log')
 
         db_lock = multiprocessing.Lock()
-        db = tweet_tracker.Database(db_lock, mysql_user, mysql_password, mysql_db=mysql_db, mongo_db=mongo_db)
+        db = tweet_tracker.Database(db_lock, mysql_user, mysql_password, mysql_db=mysql_db)
         logger = tweet_tracker.Logger(log_file)
-        self.tracker = tweet_tracker.MarketTracker(db, negatives, logger, ['market'], dump_file)
+        self.tracker = tweet_tracker.MarketTracker(db, negatives, logger, ['market'], dump_file, tweet_dir)
         
         self.tracker.frequencies = {} # this isn't empty sometimes for some reason. could not reproduce outside of unittest
 
