@@ -9,9 +9,23 @@ import MySQLdb
 import tweetstream
 import logging
 import smtplib
+import multiprocessing
+import os
+
+DEBUG = False # global to control debug output
+
+def debug(msg):
+    if DEBUG:
+        pid = multiprocessing.current_process().pid
+        print '%s: %d: %s' % (datetime.datetime.utcnow(), pid, msg)
+        sys.stdout.flush()
 
 ## helpers - move these out at some point
-utc_open_time = datetime.time(14,30,0) # 9:30am EST = 2:30pm UTC # TODO: daylight savings time
+utc_open_time = datetime.time(13,30,0) # 9:30am EST = 1:30pm UTC # TODO: daylight savings time
+if DEBUG:
+    utc_open_time = (datetime.datetime.utcnow()+datetime.timedelta(seconds=5)).time() # for debugging
+    debug('open time: %s' % str(utc_open_time))
+
 def round_to_next_open(dt):
     """return dt as YYYY-MM-DD string rounded futureward to 9:30am EST"""
     return str(dt.date() if dt.time() < utc_open_time else dt.date() + datetime.timedelta(days=1))
@@ -21,9 +35,10 @@ class Logger:
     def __init__(self, logfile):
         logging.basicConfig(filename=logfile, level=logging.DEBUG, format='%(asctime)s %(levelname)s %(message)s') # initialize logging
 
-    def log(self, message, tweet=None):
+    def log(self, message):
         """log an error message to a logfile"""
-        logging.error('%s # %s', message, tweet)
+        debug(message)
+        logging.error(message)
 
 
 class Stream:
@@ -43,8 +58,9 @@ class Stream:
                 with tweetstream.FilterStream(self.username, self.password, track=self.terms) as stream:
                     for tweet in stream:
                         yield tweet
+                        debug('count: %d' % stream.count)
             except tweetstream.ConnectionError as e:
-                self.logger.log(e, None)
+                self.logger.log(e)
 
 class Database:
     """
@@ -57,12 +73,20 @@ class Database:
         # connect to mysql
         self.mysql = MySQLdb.connect(user=mysql_user, passwd=mysql_password, db=mysql_db)
         self.mysql_cursor = self.mysql.cursor()
-        
-    def mysql_execute(self, query, params=None):
-        self.lock.acquire()
-        self.mysql_cursor.execute(query, params)
-        self.lock.release()
+        self.mysql_cursor.execute('SET wait_timeout=90000') # this is a temporary hack. this should be specified in /etc/mysql/my.cnf but that isn't working for some reason
 
+    def mysql_execute(self, query, params=None):
+        debug('lock: acquiring')
+        self.lock.acquire()
+        try: 
+            debug('executing: %s' % (query % params))
+            self.mysql_cursor.execute(query, params)
+        except Exception as e:
+            raise e
+        finally:
+            debug('lock: releasing')
+            self.lock.release()
+        
     def mysql_fetchone(self, query, params=None):
         self.mysql_cursor.execute(query, params)
         return self.mysql_cursor.fetchone()
@@ -74,20 +98,19 @@ class Database:
     def get_terms(self, term_types=[]):
         return [row[0] for row in self.mysql_fetchall("SELECT `term` FROM `terms`" + ("WHERE `type` in ('%s')" % ("','".join(term_types)) if term_types else ""))]
 
+
 class Crawler:
     """Stream tweets from twitter and execute callbacks"""
     def __init__(self, stream, observers):
         self.stream = stream
         self.observers = observers
 
-    def crawl(self):
+    def crawl(self, name=''):
+        print 'crawling'
         for tweet in self.stream.tweets():
+            debug('got tweet')
             for observer in self.observers: # TODO: have a thread for each
-                try:
-                    observer(tweet)
-                except: # catch any unhandled exceptions in observer
-                    email_alert()
-                    raise e
+                observer(tweet)
 
 TWEETFILE = 'tweets.txt'
 
@@ -169,31 +192,39 @@ class Tracker:
             pickle.dump((self.frequencies, self.tweet_count), pickle_file)
 
     def save_tweet(self, tweet):
-        self.tweetfile.write(tweet) # TODO handle exceptions here
-            
+        debug('saving')
+        self.tweetfile.write(str(tweet))
+        self.tweetfile.write('\n')
+
     def handle_tweet(self, tweet):
+        debug('handling')
         try:
             text = tweet['text']
         except KeyError:
-            self.logger.log('No text', tweet)
+            self.logger.log('No text: %s' % tweet)
             return
         self.tweet_count += 1
         now_date = round_to_next_open(datetime.datetime.utcnow())
+        debug('now_date: %s' % now_date)
         if now_date != self.last_date:
             if self.last_date:
                 self.end_day(self.last_date)
             self.start_day(now_date, tweet['id'])
         self.increment_frequencies(text)
         self.last_date = now_date
+        debug('handled')
+
 
     def start_day(self, date_str, first_tweet_id):
+        debug('enter: start_day')
         try:
             self.db.mysql_execute("""INSERT INTO `daily_data`
                                      (`date`, `first_tweet_id`, `tracker_class`)
                                      VALUES(%s, %s, %s)""",
                                   (date_str, first_tweet_id, self.__class__.__name__))
         except MySQLdb.IntegrityError as e:
-            self.logger.log(e, None)
+            self.logger.log(e)
+        debug('exit: start_day')
 
 
     def end_day(self, date_str):
@@ -202,25 +233,23 @@ class Tracker:
         write tweets_pulled to sql
         write all counts to sql
         """
+        debug('enter: end_day')
         self.db.mysql_execute("""UPDATE `daily_data`
-                           SET `tweets_pulled` = %s,
-                               `tracker_class` = %s
-                           WHERE `date` = %s""",
-                        (self.tweet_count, self.__class__.__name__, date_str))
+                                 SET `tweets_pulled` = %s
+                                 WHERE `date` = %s
+                                   AND `tracker_class` = %s""",
+                              (self.tweet_count, date_str, self.__class__.__name__))
         if self.db.mysql_cursor.rowcount == 0: #  nothing was updated
             self.logger.log('end_day: no row for date %s' % date_str)
             self.db.mysql_execute("""INSERT INTO `daily_data`
                                      (`date`, `tweets_pulled`, `tracker_class`)
                                      VALUES(%s, %s, %s)""",
                                   (date_str, self.tweet_count, self.__class__.__name__))
-        try:
-            self.write_frequencies(date_str)
-            self.rotate_tweetfile(date_str)
-            self.tweet_count = 0
-            self.frequencies = dict()
-        except Exception as e:
-            self.logger.log(e)
-            self.dump()
+        self.write_frequencies(date_str)
+        self.rotate_tweetfile(date_str)
+        self.tweet_count = 0
+        self.frequencies = dict()
+        debug('exit: end_day')
 
 
     def write_frequencies(self, date_str):
@@ -235,12 +264,25 @@ class Tracker:
 
     def rotate_tweetfile(self, date_str):
         self.tweetfile.close()
-        self.tweetfile = open('%s/%s' % (self.tweet_dir, TWEETFILE), 'r+')
-        zipped = gzip.open('%s/tweets_%s.txt.gz' % (self.tweet_dir, date_str), 'wb')
-        zipped.writelines(self.tweetfile)
-        zipped.close()
-        self.tweetfile.truncate(0)
+        
+        # rename the file
+        filename = '%s/%s' % (self.tweet_dir, TWEETFILE)
+        tempname = '%s/temp.txt' % self.tweet_dir
+        os.rename(filename, tempname)
 
+        # spawn process to compress (don't wait for it)
+        process = multiprocessing.Process(target=self.compress, args=(tempname, date_str))
+        process.start()
+
+        # reopen tweetfile
+        debug('opened %s' % filename)
+        self.tweetfile = open(filename, 'w')
+
+    def compress(self, filename, date_str):
+        with open(filename) as unzipped:
+            zipped = gzip.open('%s/tweets_%s.txt.gz' % (self.tweet_dir, date_str), 'wb')
+            zipped.writelines(unzipped)
+            zipped.close()
 
 class EmotionTracker(Tracker):
     """Tracker subclass for tracking emotional words and emoticons"""

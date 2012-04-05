@@ -9,7 +9,9 @@ import ConfigParser
 import sys
 import optparse
 
+import os
 import multiprocessing
+import time
 
 def main():
     # parse command line options
@@ -22,22 +24,29 @@ def main():
 
     db_lock = multiprocessing.Lock()
 
-    emotion_process = spawn('emotion', options.emotion_dump_file, db_lock)
-    market_process = spawn('market', options.market_dump_file, db_lock)
+    market_process = multiprocessing.Process(target = spawn, args = ('market', options.market_dump_file, db_lock))
+    # market_process.daemon = True
+    market_process.start()
+    print "%d: I'm the market process" % market_process.pid
 
-    emotion_process.join()
-    market_process.join()
+    time.sleep(2)
     
+    emotion_process = multiprocessing.Process(target = spawn, args = ('emotion', options.emotion_dump_file, db_lock))
+    # emotion_process.daemon = True
+    emotion_process.start()
+    print "%d: I'm the emotion process" % emotion_process.pid
 
+    print 'waiting...'
+    market_process.join()
+    emotion_process.join()
+    print 'exiting'
 
-
-def spawn(class, dump_file, db_lock):
+def spawn(class_name, dump_file, db_lock):
     # register callbacks for exit and interrupt
     atexit.register(email_alert)
-    signal.signal(signal.SIGINT, sigint_handler) # respond to SIGINT by dumping
 
     # get config stuff
-    CONFIG_FILE = '../config/%s_tracker.cfg' % class
+    CONFIG_FILE = '../config/%s_tracker.cfg' % class_name
     config = ConfigParser.ConfigParser()
     with open(CONFIG_FILE) as configfile:
         config.readfp(configfile)
@@ -55,29 +64,26 @@ def spawn(class, dump_file, db_lock):
         negatives = negativesfile.read()
 
     # read dump if specified in command line args
-    if dump_file:
+    try:
         with open(dump_file) as dumpfile:
             dump = pickle.load(dumpfile)
-    else:
+    except IOError, TypeError:
         dump = ({},0)
     
     # create all the pieces
     logger          = Logger(log_file)
     db              = Database(db_lock, mysql_user, mysql_password)
-    if class == 'emotion':
-        tracker = EmotionTracker(db, negatives, logger, ['word', 'emoticon'], dump_file, tweet_file, dump)
-    elif class == 'market':
-        tracker = MarketTracker(db, negatives, logger, ['market'], dump_file, tweet_file, dump)
+    if class_name == 'emotion':
+        tracker = EmotionTracker(db, negatives, logger, ['word', 'emoticon'], dump_file, tweet_dir, dump)
+    elif class_name == 'market':
+        tracker = MarketTracker(db, negatives, logger, ['market', 'ticker'], dump_file, tweet_dir, dump)
     else:
-        raise ArgumentError('unknown class %s' % class)
+        raise ArgumentError('unknown class %s' % class_name)
     stream  = Stream(twitter_user, twitter_password, tracker.terms, logger)
     crawler = Crawler(stream, [tracker.save_tweet, tracker.handle_tweet])
 
     # run it
-    process = multiprocess.Process(target = crawler.crawl())
-    process.start()
-
-    return process
+    crawler.crawl(class_name)
     
 
 if __name__ == "__main__":

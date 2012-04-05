@@ -2,8 +2,8 @@
 
 import MySQLdb
 
-TYPE = 'emotion'
-FILE = '../terms/emotion.txt'
+TYPE = 'ticker'
+FILE = '../terms/ticker.txt'
 
 
 def import_terms(terms):
