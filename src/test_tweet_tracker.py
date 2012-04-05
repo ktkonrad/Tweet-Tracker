@@ -6,6 +6,8 @@ import datetime
 import ConfigParser
 import multiprocessing
 import gzip
+import os
+import time
 
 CONFIG_FILE = '../config/test_tweet_tracker.cfg'
 
@@ -25,12 +27,23 @@ class TestEmotionTracker(unittest.TestCase):
             dump_file = home_dir + '/' + config.get('files', 'dump')
             log_file = home_dir + '/' + config.get('files', 'log')
 
+        self.tweet_dir = tweet_dir
+
         db_lock = multiprocessing.Lock()
         db = tweet_tracker.Database(db_lock, mysql_user, mysql_password, mysql_db=mysql_db)
         logger = tweet_tracker.Logger(log_file)
-        self.tracker = tweet_tracker.EmotionTracker(db, negatives, logger, ['word', 'emoticon'], dump_file, home_dir)
+        self.tracker = tweet_tracker.EmotionTracker(db, negatives, logger, ['word', 'emoticon'], dump_file, tweet_dir)
         
         self.tracker.frequencies = {} # this isn't empty sometimes for some reason. could not reproduce outside of unittest
+
+    def tearDown(self):
+        # remove all files in tweets/test
+        for f in os.listdir(self.tweet_dir):
+            file_path = os.path.join(self.tweet_dir, f)
+            try:
+                os.remove(file_path)
+            except Exception, e:
+                print e
 
     def test_is_negative(self):
         self.assertTrue(self.tracker.is_negative('not'))
@@ -103,7 +116,7 @@ class TestEmotionTracker(unittest.TestCase):
         self.assertEqual(self.tracker.frequencies[term_ids[4]], [0,0,1]) # hashtag
 
     def test_round_to_next_open(self):
-        dt1 = datetime.datetime(2012,1,1,14,0,0)
+        dt1 = datetime.datetime(2012,1,1,13,0,0)
         dt2 = datetime.datetime(2012,1,1,15,0,0)
         self.assertEqual('2012-01-01', tweet_tracker.round_to_next_open(dt1))
         self.assertEqual('2012-01-02', tweet_tracker.round_to_next_open(dt2))
@@ -211,13 +224,20 @@ class TestEmotionTracker(unittest.TestCase):
             self.assertEqual(stripped_string, self.tracker.strip_punctuation(string))
 
     def test_rotate_tweetfile(self):
-        tweet = "this is a test"
-        date_str = '2011-01-01'
+        tweet = os.urandom(1000000) # 1 MB of random data
+        date_str = '2012-01-01'
         self.tracker.save_tweet(tweet)
         self.tracker.rotate_tweetfile(date_str)
-        with gzip.open('%s/tweets_%s.txt.gz' % (self.tracker.tweet_dir, date_str), 'rb') as zipped:
+        zipfile = '%s/tweets_%s.txt.gz' % (self.tracker.tweet_dir, date_str)
+        # wait for compression to finish
+        # this is a hack and not safe
+        # the file may exist but still be being written to
+        # works fine for 1MB file though
+        while not os.path.exists(zipfile):
+            time.sleep(1)
+        with gzip.open(zipfile, 'rb') as zipped:
             read_tweet = zipped.read()
-        self.assertEqual(tweet, read_tweet)
+        self.assertEqual(tweet + '\n', read_tweet)
 
 class TestMarketTracker(unittest.TestCase):
     def setUp(self):
@@ -235,12 +255,24 @@ class TestMarketTracker(unittest.TestCase):
             dump_file = home_dir + '/' + config.get('files', 'dump')
             log_file = home_dir + '/' + config.get('files', 'log')
 
+        self.tweet_dir = tweet_dir
+
         db_lock = multiprocessing.Lock()
         db = tweet_tracker.Database(db_lock, mysql_user, mysql_password, mysql_db=mysql_db)
         logger = tweet_tracker.Logger(log_file)
         self.tracker = tweet_tracker.MarketTracker(db, negatives, logger, ['market'], dump_file, tweet_dir)
         
         self.tracker.frequencies = {} # this isn't empty sometimes for some reason. could not reproduce outside of unittest
+       
+
+    def tearDown(self):
+        # remove all files in tweets/test
+        for f in os.listdir(self.tweet_dir):
+            file_path = os.path.join(self.tweet_dir, f)
+            try:
+                os.remove(file_path)
+            except Exception, e:
+                print e
 
     def test_grouped_ngrams(self):
         words = ['a','b','c','d','e']
