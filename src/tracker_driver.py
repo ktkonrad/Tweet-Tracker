@@ -80,7 +80,7 @@ def spawn(class_name, dump_file, db_lock):
     else:
         raise ArgumentError('unknown class %s' % class_name)
     stream  = Stream(twitter_user, twitter_password, tracker.terms, logger)
-    crawler = Crawler(stream, [tracker.save_tweet, tracker.handle_tweet])
+    crawler = Crawler(stream, [tracker.handle_tweet])
 
     # run it
     crawler.crawl(class_name)

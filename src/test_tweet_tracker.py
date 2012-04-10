@@ -8,8 +8,14 @@ import multiprocessing
 import gzip
 import os
 import time
+import random
 
 CONFIG_FILE = '../config/test_tweet_tracker.cfg'
+
+# helpers
+def text_to_tweet(text):
+    """put text into a tweet datastructure"""
+    return {'id':random.randint(10000,100000), 'text':text}
 
 class TestEmotionTracker(unittest.TestCase):
     def setUp(self):
@@ -32,7 +38,7 @@ class TestEmotionTracker(unittest.TestCase):
         db_lock = multiprocessing.Lock()
         db = tweet_tracker.Database(db_lock, mysql_user, mysql_password, mysql_db=mysql_db)
         logger = tweet_tracker.Logger(log_file)
-        self.tracker = tweet_tracker.EmotionTracker(db, negatives, logger, ['word', 'emoticon'], dump_file, tweet_dir)
+        self.tracker = tweet_tracker.EmotionTracker(db, negatives, logger, ['emotion', 'emoticon'], dump_file, tweet_dir)
         
         self.tracker.frequencies = {} # this isn't empty sometimes for some reason. could not reproduce outside of unittest
 
@@ -44,6 +50,10 @@ class TestEmotionTracker(unittest.TestCase):
                 os.remove(file_path)
             except Exception, e:
                 print e
+        # delete stuff from db
+        self.tracker.db.mysql_execute("DELETE FROM frequencies");
+        self.tracker.db.mysql_execute("DELETE FROM daily_data");
+
 
     def test_is_negative(self):
         self.assertTrue(self.tracker.is_negative('not'))
@@ -122,31 +132,26 @@ class TestEmotionTracker(unittest.TestCase):
         self.assertEqual('2012-01-02', tweet_tracker.round_to_next_open(dt2))
 
     def test_start_day(self):
-        date_str = '2012-01-01'
-        first_tweet_id = 123456L
+        date_str = tweet_tracker.round_to_next_open(datetime.datetime.utcnow())
+        first_tweet_id = random.randint(10000,100000)
 
-        self.tracker.start_day(date_str, first_tweet_id)
+        self.tracker.start_day(first_tweet_id)
 
         (db_first_tweet_id,) = self.tracker.db.mysql_fetchone("""SELECT `first_tweet_id`
                                                                  FROM `daily_data`
                                                                  WHERE `date` = %s
                                                                    AND `tracker_class` = %s""",
                                                               (date_str, self.tracker.__class__.__name__))
-        # cleanup
-        self.tracker.db.mysql_execute("""DELETE FROM `daily_data`
-                                         WHERE `date` = %s
-                                           AND `tracker_class` = %s""",
-                                      (date_str, self.tracker.__class__.__name__))
-
         self.assertEqual(first_tweet_id, db_first_tweet_id)
 
     def test_end_day(self):
-        date_str = '2012-01-01'
-        tweet_count = 42
-
-        self.tracker.start_day(date_str, 0L)
-        self.tracker.tweet_count = tweet_count
-        self.tracker.end_day(date_str)
+        date_str =tweet_tracker.round_to_next_open(datetime.datetime.utcnow())
+        tweet_count = random.randint(50,100)
+        self.tracker.start_day(0L)
+        tweet = text_to_tweet('hi')
+        for i in xrange(tweet_count):
+            self.tracker.handle_tweet(tweet)
+        self.tracker.end_day()
 
         self.tracker.db.mysql_cursor.execute("""SELECT `tweets_pulled`
                                                 FROM `daily_data`
@@ -156,19 +161,16 @@ class TestEmotionTracker(unittest.TestCase):
 
         (db_tweet_count,) = self.tracker.db.mysql_cursor.fetchone()
 
-        # cleanup
-        self.tracker.db.mysql_cursor.execute("""DELETE FROM `daily_data`
-                                                WHERE `date` = %s
-                                                  AND `tracker_class` = %s""",
-                                             (date_str, self.tracker.__class__.__name__))
         self.assertEqual(tweet_count, db_tweet_count)
 
 
     def test_end_day_without_start(self):
-        date_str = '2012-01-01'
-        tweet_count = 42
-        self.tracker.tweet_count = tweet_count
-        self.tracker.end_day(date_str) 
+        date_str = tweet_tracker.round_to_next_open(datetime.datetime.utcnow())
+        tweet_count = random.randint(50,100)
+        tweet = text_to_tweet('hi')
+        for i in xrange(tweet_count):
+            self.tracker.handle_tweet(tweet)
+        self.tracker.end_day() 
         self.tracker.db.mysql_cursor.execute("""SELECT `tweets_pulled`
                                              FROM `daily_data`
                                              WHERE `date` =  %s
@@ -176,10 +178,6 @@ class TestEmotionTracker(unittest.TestCase):
                                              (date_str, self.tracker.__class__.__name__))
 
         db_tweet_count = self.tracker.db.mysql_cursor.fetchone()[0]
-        self.tracker.db.mysql_cursor.execute("""DELETE FROM `daily_data`
-                                        WHERE `date` = %s
-                                          AND `tracker_class` = %s""",
-                                             (date_str, self.tracker.__class__.__name__)) # cleanup
         self.assertEqual(tweet_count, db_tweet_count)
 
     def test_get_term(self):
@@ -195,14 +193,16 @@ class TestEmotionTracker(unittest.TestCase):
         
 
     def test_write_frequencies(self):
-        date_str = '2012-01-01'
+        date_str =tweet_tracker.round_to_next_open(datetime.datetime.utcnow())
+        tweet_texts = ["hopeless not calm :)", "calm calm but no :) can't hopeless", "#calm :) couldn't hopeless calm"]
+        #               -            -    +     +    +           +        +           h     +           +        -
+        tweets = map(text_to_tweet, tweet_texts)
         terms = ['hopeless', 'calm', ':)']
         (term_ids, term_is_negatives, _) = zip(*map(self.tracker.get_term, terms))
-        frequencies = [[2, 4, 0], [3, 1, 2], [2, 0, 1]]
-        for term_id, frequency in zip(term_ids, frequencies):
-            self.tracker.frequencies[term_id] = frequency
-        
-        self.tracker.write_frequencies(date_str)
+        frequencies = [[2, 1, 0], [2, 2, 1], [3, 0, 0]]
+        for tweet in tweets:
+            self.tracker.handle_tweet(tweet)
+        self.tracker.write_frequencies()
         
         for term_id, frequency in zip(term_ids, frequencies):
             db_frequency = list(self.tracker.db.mysql_fetchone("""SELECT `positive`, `negative`, `hashtag`
@@ -210,11 +210,6 @@ class TestEmotionTracker(unittest.TestCase):
                                                                   WHERE `term_id` = %s
                                                                     AND `date` = %s""",
                                                                (term_id, date_str)))
-            # cleanup
-            self.tracker.db.mysql_execute("""DELETE FROM `frequencies`
-                                             WHERE `term_id` = %s
-                                               AND `date` = %s""",
-                                          (term_id, date_str))
             self.assertEqual(frequency, db_frequency)
 
     def test_strip_punctuation(self):
@@ -224,11 +219,12 @@ class TestEmotionTracker(unittest.TestCase):
             self.assertEqual(stripped_string, self.tracker.strip_punctuation(string))
 
     def test_rotate_tweetfile(self):
-        tweet = os.urandom(1000000) # 1 MB of random data
-        date_str = '2012-01-01'
-        self.tracker.save_tweet(tweet)
-        self.tracker.rotate_tweetfile(date_str)
-        zipfile = '%s/tweets_%s.txt.gz' % (self.tracker.tweet_dir, date_str)
+        date_str = tweet_tracker.round_to_next_open(datetime.datetime.utcnow())
+        tweet = {'id':'123456789'}
+        tweet['text'] = os.urandom(10) # 1 MB of random data
+        self.tracker.handle_tweet(tweet)
+        self.tracker.end_day()
+        zipfile = '%s/%s.txt.gz' % (self.tracker.tweet_dir, date_str)
         # wait for compression to finish
         # this is a hack and not safe
         # the file may exist but still be being written to
@@ -237,7 +233,9 @@ class TestEmotionTracker(unittest.TestCase):
             time.sleep(1)
         with gzip.open(zipfile, 'rb') as zipped:
             read_tweet = zipped.read()
-        self.assertEqual(tweet + '\n', read_tweet)
+
+        self.assertEqual(str(tweet) + '\n', read_tweet)
+        self.assertNotIn('%s.txt' % (date_str,), os.listdir(self.tracker.tweet_dir))
 
 class TestMarketTracker(unittest.TestCase):
     def setUp(self):
@@ -260,7 +258,7 @@ class TestMarketTracker(unittest.TestCase):
         db_lock = multiprocessing.Lock()
         db = tweet_tracker.Database(db_lock, mysql_user, mysql_password, mysql_db=mysql_db)
         logger = tweet_tracker.Logger(log_file)
-        self.tracker = tweet_tracker.MarketTracker(db, negatives, logger, ['market'], dump_file, tweet_dir)
+        self.tracker = tweet_tracker.MarketTracker(db, negatives, logger, ['market', 'ticker'], dump_file, tweet_dir)
         
         self.tracker.frequencies = {} # this isn't empty sometimes for some reason. could not reproduce outside of unittest
        
@@ -273,6 +271,9 @@ class TestMarketTracker(unittest.TestCase):
                 os.remove(file_path)
             except Exception, e:
                 print e
+        # delete stuff from db
+        self.tracker.db.mysql_execute("DELETE FROM frequencies");
+        self.tracker.db.mysql_execute("DELETE FROM daily_data");
 
     def test_grouped_ngrams(self):
         words = ['a','b','c','d','e']

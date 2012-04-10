@@ -78,8 +78,8 @@ class Database:
     def mysql_execute(self, query, params=None):
         debug('lock: acquiring')
         self.lock.acquire()
-        try: 
-            debug('executing: %s' % (query % params))
+        try:
+            debug('executing: %s' % ((query % params) if params else query))
             self.mysql_cursor.execute(query, params)
         except Exception as e:
             raise e
@@ -131,8 +131,7 @@ class Tracker:
         self.frequencies = frequencies
         self.tweet_count = tweet_count
         self.tweet_dir = tweet_dir
-
-        self.tweetfile = open(self.tweet_dir + '/' + TWEETFILE, 'w')
+        self.tweetfile = None
 
     def get_term(self, term):
         """return id (or None if term is not a term), term.is_negative, term.type
@@ -140,14 +139,14 @@ class Tracker:
         """
         term = term[1:] if term[0] == '#' else term
         try:
-            (term_id, is_negative, is_word) = self._term_info[term]
+            (term_id, is_negative, term_type) = self._term_info[term]
             if not term_id:
                 row = self.db.mysql_fetchone("""SELECT `id`, `is_negative`, `type` FROM `terms` where `term` = %s""", (term,))
                 term_id = row[0]
                 is_negative = bool(row[1])
-                is_word = row[2]
-                self._term_info[term] = (term_id, is_negative, is_word)
-            return (term_id, is_negative, is_word)
+                term_type = row[2]
+                self._term_info[term] = (term_id, is_negative, term_type)
+            return (term_id, is_negative, term_type)
         except KeyError:
             return (None, None, None)
 
@@ -209,14 +208,16 @@ class Tracker:
         if now_date != self.last_date:
             if self.last_date:
                 self.end_day(self.last_date)
-            self.start_day(now_date, tweet['id'])
+            self.start_day(tweet['id'])
         self.increment_frequencies(text)
         self.last_date = now_date
+        self.save_tweet(tweet)
         debug('handled')
 
 
-    def start_day(self, date_str, first_tweet_id):
+    def start_day(self, first_tweet_id):
         debug('enter: start_day')
+        date_str = round_to_next_open(datetime.datetime.utcnow())
         try:
             self.db.mysql_execute("""INSERT INTO `daily_data`
                                      (`date`, `first_tweet_id`, `tracker_class`)
@@ -224,12 +225,12 @@ class Tracker:
                                   (date_str, first_tweet_id, self.__class__.__name__))
         except MySQLdb.IntegrityError as e:
             self.logger.log(e)
+        self.tweetfile = open('%s/%s.txt' % (self.tweet_dir, date_str), 'w')
         debug('exit: start_day')
 
 
-    def end_day(self, date_str):
+    def end_day(self):
         """
-        date_str: DD-MM-YYYY of day to end
         write tweets_pulled to sql
         write all counts to sql
         """
@@ -238,21 +239,31 @@ class Tracker:
                                  SET `tweets_pulled` = %s
                                  WHERE `date` = %s
                                    AND `tracker_class` = %s""",
-                              (self.tweet_count, date_str, self.__class__.__name__))
+                              (self.tweet_count, self.last_date, self.__class__.__name__))
         if self.db.mysql_cursor.rowcount == 0: #  nothing was updated
-            self.logger.log('end_day: no row for date %s' % date_str)
+            self.logger.log('end_day: no row for date %s' % self.last_date)
             self.db.mysql_execute("""INSERT INTO `daily_data`
                                      (`date`, `tweets_pulled`, `tracker_class`)
                                      VALUES(%s, %s, %s)""",
-                                  (date_str, self.tweet_count, self.__class__.__name__))
-        self.write_frequencies(date_str)
-        self.rotate_tweetfile(date_str)
+                                  (self.last_date, self.tweet_count, self.__class__.__name__))
+        self.write_frequencies()
+
+        # close tweetfile and compress it (in another process)
+        try:
+            self.tweetfile.close()
+        except AttributeError: # if no tweets were handled tweetfile will be None
+            pass
+        else: 
+            filename = self.tweetfile.name
+            process = multiprocessing.Process(target=self.compress, args=(filename,))
+            process.start()
+
         self.tweet_count = 0
         self.frequencies = dict()
         debug('exit: end_day')
 
 
-    def write_frequencies(self, date_str):
+    def write_frequencies(self):
         """
         write all the frequencies to sql
         """
@@ -260,29 +271,20 @@ class Tracker:
             self.db.mysql_execute("""INSERT INTO `frequencies`
                                      (`term_id`, `date`, `positive`, `negative`, `hashtag`)
                                      VALUES(%s, %s, %s, %s, %s)""",
-                                  (term_id, date_str, positive, negative, hashtag))
+                                  (term_id, self.last_date, positive, negative, hashtag))
 
-    def rotate_tweetfile(self, date_str):
-        self.tweetfile.close()
-        
-        # rename the file
-        filename = '%s/%s' % (self.tweet_dir, TWEETFILE)
-        tempname = '%s/temp.txt' % self.tweet_dir
-        os.rename(filename, tempname)
+    def compress(self, filename):
+        """compress and a file (deletes the uncompressed file)"""
+        try:
+            with open(filename) as unzipped:
+                zipped = gzip.open('%s.gz' % (filename), 'wb')
+                zipped.writelines(unzipped)
+                zipped.close()
+        except IOError as e: # the file won't exist if it was never written to
+            self.logger.log(e)
+        else:
+            os.remove(filename)
 
-        # spawn process to compress (don't wait for it)
-        process = multiprocessing.Process(target=self.compress, args=(tempname, date_str))
-        process.start()
-
-        # reopen tweetfile
-        debug('opened %s' % filename)
-        self.tweetfile = open(filename, 'w')
-
-    def compress(self, filename, date_str):
-        with open(filename) as unzipped:
-            zipped = gzip.open('%s/tweets_%s.txt.gz' % (self.tweet_dir, date_str), 'wb')
-            zipped.writelines(unzipped)
-            zipped.close()
 
 class EmotionTracker(Tracker):
     """Tracker subclass for tracking emotional words and emoticons"""
@@ -306,7 +308,7 @@ class EmotionTracker(Tracker):
             if term_id:
                 if self.is_hashtag(word):
                     component = 'hashtag'
-                elif is_negative ^ (term_type == 'word' and (last_negative <= NEGATIVE_SCOPE)):
+                elif is_negative ^ (term_type == 'emotion' and (last_negative <= NEGATIVE_SCOPE)):
                     component = 'negative'
                 else:
                     component = 'positive'
