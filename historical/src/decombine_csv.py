@@ -1,12 +1,11 @@
 import sys
-
-DELIMITER = '\t'
-#DELIMITER = ','
+import csv
 
 def decombine(filename, outdir):
     """split an aggregated file of historical frequencies into individual files (one for each column)"""
-    with open(filename) as infile:
-        data = [line.split(DELIMITER) for line in infile.readlines()]
+    with open(filename) as f:
+        reader = csv.reader(f)
+        data = [line for line in reader]
         columns = zip(*data) # transpose it so we can iterate over columns easily
         dates = columns[0][1:]
         for col in columns[1:]:
